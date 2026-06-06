@@ -28,7 +28,7 @@ import os
 plt.switch_backend('Agg')
 rcParams['font.family'] = 'DejaVu Sans'
 
-TOKEN = '8630991777:AAES50Ycx0TY1ZP2OdrT1cZZjmoJyoM2oic'
+TOKEN = 'СВОЙ ТОКЕН'
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
