@@ -1,8 +1,6 @@
 # !/usr/bin/env python3
-"""
-Telegram-бот для учёта финансов.
-Полностью рабочий, без зависаний.
-"""
+
+
 
 import logging
 import sqlite3
