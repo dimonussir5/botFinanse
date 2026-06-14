@@ -1,6 +1,13 @@
 # !/usr/bin/env python3
+"""
+Telegram-бот для учёта финансов.
+Полностью рабочий, без зависаний.
+"""
+
 import logging
 import sqlite3
+import subprocess
+import os
 import io
 import csv
 import numpy as np
@@ -23,7 +30,7 @@ import os
 plt.switch_backend('Agg')
 rcParams['font.family'] = 'DejaVu Sans'
 
-TOKEN = 'СВОЙ ТОКЕН'
+TOKEN = '8630991777:AAES50Ycx0TY1ZP2OdrT1cZZjmoJyoM2oic'
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -1524,6 +1531,33 @@ def get_report_data(user_id, start_date, end_date):
         return agg, transactions
 
 
+def excel_to_pdf(excel_path: str, pdf_path: str = None):
+    excel_path = os.path.abspath(excel_path)
+
+    if pdf_path is None:
+        pdf_path = os.path.splitext(excel_path)[0] + ".pdf"
+    pdf_path = os.path.abspath(pdf_path)
+
+    ps_script = f"""
+    $excel = New-Object -ComObject Excel.Application
+    $excel.Visible = $false
+    $excel.DisplayAlerts = $false
+
+    $wb = $excel.Workbooks.Open("{excel_path}")
+    $wb.ExportAsFixedFormat(0, "{pdf_path}")
+
+    $wb.Close($false)
+    $excel.Quit()
+    """
+
+    subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+        check=True
+    )
+
+    return pdf_path
+
+
 # ---------- Обработчики ----------
 async def start(update, context):
     user = update.effective_user
@@ -1639,22 +1673,6 @@ async def report_interval(update, context):
     return REPORT_INTERVAL
 
 
-async def report_callback(update, context):
-    query = update.callback_query
-    await query.answer()
-    uid = update.effective_user.id
-    interval = query.data
-    if interval == 'day':
-        await query.edit_message_text(get_text(uid, 'enter_day'))
-        return REPORT_DAY
-    elif interval == 'month':
-        await generate_monthly_report(update, context, query)
-        return ConversationHandler.END
-    else:
-        await generate_yearly_report(update, context, query)
-        return ConversationHandler.END
-
-
 async def report_day(update, context):
     uid = update.effective_user.id
     try:
@@ -1663,14 +1681,14 @@ async def report_day(update, context):
             now = datetime.now()
             try:
                 selected = now.replace(day=day)
-                await generate_daily_report(update, context, selected)
-                return ConversationHandler.END
-            except:
+                # ВАЖНО: возвращаем результат generate_daily_report
+                return await generate_daily_report(update, context, selected)
+            except ValueError:
                 await update.message.reply_text(get_text(uid, 'invalid_day'))
                 return REPORT_DAY
         else:
             raise ValueError
-    except:
+    except ValueError:
         await update.message.reply_text(get_text(uid, 'invalid_day'))
         return REPORT_DAY
 
@@ -1704,6 +1722,28 @@ async def generate_daily_report(update, context, date):
     return EXPORT
 
 
+async def generate_yearly_report(update, context, query=None):
+    uid = update.effective_user.id
+    year = datetime.now().year
+    text = f"📅 *{year}*\n"
+    for m in range(1, 13):
+        start = datetime(year, m, 1)
+        end = (start + timedelta(days=32)).replace(day=1) - timedelta(seconds=1)
+        agg, _ = get_report_data(uid, start, end)
+        total_inc = sum(d['income'] for d in agg.values())
+        total_exp = sum(d['expense'] for d in agg.values())
+        text += f"{start.strftime('%B')}: +{total_inc:.2f} -{total_exp:.2f}\n"
+    context.user_data['year_report_text'] = text
+    if query:
+        await query.edit_message_text(text, parse_mode='Markdown')
+        await query.message.reply_text(get_text(uid, 'export_prompt'), reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("TXT", callback_data='export_yeartxt')]]))
+    else:
+        await update.message.reply_text(text, parse_mode='Markdown')
+        await update.message.reply_text(get_text(uid, 'export_prompt'), reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("TXT", callback_data='export_yeartxt')]]))
+
+
 async def generate_monthly_report(update, context, query=None):
     uid = update.effective_user.id
     now = datetime.now()
@@ -1733,44 +1773,27 @@ async def generate_monthly_report(update, context, query=None):
         await update.message.reply_text(get_text(uid, 'export_prompt'), reply_markup=InlineKeyboardMarkup([buttons]))
 
 
-async def generate_yearly_report(update, context, query=None):
-    uid = update.effective_user.id
-    year = datetime.now().year
-    text = f"📅 *{year}*\n"
-    for m in range(1, 13):
-        start = datetime(year, m, 1)
-        end = (start + timedelta(days=32)).replace(day=1) - timedelta(seconds=1)
-        agg, _ = get_report_data(uid, start, end)
-        total_inc = sum(d['income'] for d in agg.values())
-        total_exp = sum(d['expense'] for d in agg.values())
-        text += f"{start.strftime('%B')}: +{total_inc:.2f} -{total_exp:.2f}\n"
-    context.user_data['year_report_text'] = text
-    if query:
-        await query.edit_message_text(text, parse_mode='Markdown')
-        await query.message.reply_text(get_text(uid, 'export_prompt'), reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("TXT", callback_data='export_yeartxt')]]))
-    else:
-        await update.message.reply_text(text, parse_mode='Markdown')
-        await update.message.reply_text(get_text(uid, 'export_prompt'), reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("TXT", callback_data='export_yeartxt')]]))
-
-
 async def export_callback(update, context):
     query = update.callback_query
     await query.answer()
     uid = update.effective_user.id
     fmt = query.data.split('_')[1]
+
     if fmt == 'yeartxt':
         text = context.user_data.get('year_report_text', '')
         file = io.BytesIO(text.encode('utf-8'))
         await query.message.reply_document(document=file, filename=f"report_{datetime.now().year}.txt")
         return ConversationHandler.END
+
     agg, transactions, start, end, rtype = context.user_data.get('report_data', (None, None, None, None, None))
     if not agg:
         await query.message.reply_text(get_text(uid, 'export_error'))
         return ConversationHandler.END
+
     month_str = start.strftime('%Y-%m') if rtype != 'day' else start.strftime('%Y-%m')
     budgets = get_monthly_budgets(uid, month_str) if rtype != 'day' else {}
+
+    # Подготовка данных
     rows1 = []
     all_cats = set(agg.keys()) | set(budgets.keys()) | {'Общая'}
     for cat in sorted(all_cats):
@@ -1780,9 +1803,12 @@ async def export_callback(update, context):
         rem = bud - exp
         pct = (exp / bud * 100) if bud > 0 else 0
         rows1.append([cat, exp, inc, bud, rem, pct])
+
     rows2 = []
     for t in transactions:
         rows2.append([t[5], t[3], t[2], float(t[1]), t[4] or ''])
+
+    # ---------- TXT ----------
     if fmt == 'txt':
         buf = io.StringIO()
         buf.write("=== Агрегированный отчёт ===\n")
@@ -1795,6 +1821,10 @@ async def export_callback(update, context):
             buf.write("\t".join(str(x) for x in r) + "\n")
         data = buf.getvalue().encode('utf-8')
         filename = f"report_{start.strftime('%Y%m%d')}_{end.strftime('%Y%m%d')}.txt"
+        await query.message.reply_document(document=io.BytesIO(data), filename=filename)
+        return ConversationHandler.END
+
+    # ---------- CSV ----------
     elif fmt == 'csv':
         buf = io.StringIO()
         writer = csv.writer(buf)
@@ -1805,51 +1835,102 @@ async def export_callback(update, context):
         writer.writerows(rows2)
         data = buf.getvalue().encode('utf-8-sig')
         filename = f"report_{start.strftime('%Y%m%d')}_{end.strftime('%Y%m%d')}.csv"
+        await query.message.reply_document(document=io.BytesIO(data), filename=filename)
+        return ConversationHandler.END
+
+    # ---------- XLSX ----------
     elif fmt == 'xlsx':
         try:
             import pandas as pd
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-                pd.DataFrame(rows1, columns=["Категория", "Расход", "Доход", "Бюджет", "Остаток", "%"]).to_excel(writer,
-                                                                                                                 sheet_name="Агрегат",
-                                                                                                                 index=False)
-                pd.DataFrame(rows2, columns=["Дата", "Категория", "Тип", "Сумма", "Комментарий"]).to_excel(writer,
-                                                                                                           sheet_name="Транзакции",
-                                                                                                           index=False)
+                pd.DataFrame(rows1, columns=["Категория", "Расход", "Доход", "Бюджет", "Остаток", "%"]).to_excel(
+                    writer, sheet_name="Агрегат", index=False)
+                pd.DataFrame(rows2, columns=["Дата", "Категория", "Тип", "Сумма", "Комментарий"]).to_excel(
+                    writer, sheet_name="Транзакции", index=False)
             data = buf.getvalue()
             filename = f"report_{start.strftime('%Y%m%d')}_{end.strftime('%Y%m%d')}.xlsx"
+            await query.message.reply_document(document=io.BytesIO(data), filename=filename)
         except ImportError:
             await query.message.reply_text("Установите pandas и openpyxl: pip install pandas openpyxl")
-            return
+        return ConversationHandler.END
+
+    # ---------- PDF (PowerShell + Excel) ----------
     elif fmt == 'pdf':
         try:
-            from fpdf import FPDF
-            pdf = FPDF()
-            pdf.add_page()
-            pdf.set_font("Arial", size=10)
-            pdf.cell(200, 10, "Aggregated Report", ln=1)
-            for r in rows1:
-                pdf.cell(200, 6, " | ".join(str(x) for x in r), ln=1)
-            pdf.add_page()
-            pdf.cell(200, 10, "Detailed Transactions", ln=1)
-            for r in rows2:
-                pdf.cell(200, 6, " | ".join(str(x) for x in r), ln=1)
-            data = pdf.output(dest='S').encode('latin1')
-            filename = f"report_{start.strftime('%Y%m%d')}_{end.strftime('%Y%m%d')}.pdf"
+            import pandas as pd
+            import tempfile
+            import uuid
+
+            # Создаём временный XLSX файл
+            xlsx_buffer = io.BytesIO()
+            with pd.ExcelWriter(xlsx_buffer, engine='openpyxl') as writer:
+                pd.DataFrame(rows1, columns=["Категория", "Расход", "Доход", "Бюджет", "Остаток", "%"]).to_excel(
+                    writer, sheet_name="Агрегат", index=False)
+                pd.DataFrame(rows2, columns=["Дата", "Категория", "Тип", "Сумма", "Комментарий"]).to_excel(
+                    writer, sheet_name="Транзакции", index=False)
+
+            xlsx_buffer.seek(0)
+            with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp_xlsx:
+                tmp_xlsx.write(xlsx_buffer.getvalue())
+                tmp_xlsx_path = tmp_xlsx.name
+
+            # Конвертируем в PDF через PowerShell
+            pdf_path = excel_to_pdf(tmp_xlsx_path)
+
+            # Отправляем PDF
+            with open(pdf_path, 'rb') as f:
+                await query.message.reply_document(
+                    document=io.BytesIO(f.read()),
+                    filename=f"report_{uuid.uuid4().hex}.pdf"
+                )
+
+            # Удаляем временные файлы
+            os.unlink(tmp_xlsx_path)
+            os.unlink(pdf_path)
+
         except ImportError:
-            await query.message.reply_text("Установите fpdf: pip install fpdf")
-            return
+            await query.message.reply_text("Установите pandas и openpyxl: pip install pandas openpyxl")
+        except Exception as e:
+            logging.error(f"PDF export error: {e}")
+            await query.message.reply_text(f"Ошибка при создании PDF: {e}")
+        return ConversationHandler.END
+
     else:
         await query.message.reply_text(get_text(uid, 'export_error'))
-        return
-    await query.message.reply_document(document=io.BytesIO(data), filename=filename)
-    return ConversationHandler.END
+        return ConversationHandler.END
+
+
+async def report_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+    uid = update.effective_user.id
+    interval = query.data
+    if interval == 'day':
+        await query.edit_message_text(get_text(uid, 'enter_day'))
+        return REPORT_DAY
+    elif interval == 'month':
+        await generate_monthly_report(update, context, query)
+        return EXPORT  # ← добавляем
+    else:  # year
+        await generate_yearly_report(update, context, query)
+        return EXPORT  # ← добавляем
 
 
 # ----- Редактирование и удаление -----
 async def edit_start(update, context):
     uid = update.effective_user.id
-    await update.message.reply_text(get_text(uid, 'edit_id'), reply_markup=ReplyKeyboardRemove())
+    text = update.message.text
+
+    # Определяем режим: удаление или редактирование
+    if text in ['🗑️ Удалить', '🗑️ Delete']:
+        context.user_data['delete_mode'] = True
+        prompt = get_text(uid, 'edit_id')
+    else:
+        context.user_data['delete_mode'] = False
+        prompt = get_text(uid, 'edit_id')
+
+    await update.message.reply_text(prompt, reply_markup=ReplyKeyboardRemove())
     return EDIT_ID
 
 
@@ -1861,21 +1942,34 @@ async def edit_get_id(update, context):
         return ConversationHandler.END
     try:
         trans_id = int(txt)
-    except:
+    except ValueError:
         await update.message.reply_text(get_text(uid, 'not_found'))
         return EDIT_ID
+
     trans = get_transaction(uid, trans_id)
     if not trans:
         await update.message.reply_text(get_text(uid, 'not_found'))
         return EDIT_ID
+
+    # Если режим удаления
+    if context.user_data.get('delete_mode', False):
+        delete_transaction_by_id(trans_id)
+        await update.message.reply_text(get_text(uid, 'delete_success'), reply_markup=main_keyboard(uid))
+        # Очищаем флаг на всякий случай
+        context.user_data.pop('delete_mode', None)
+        return ConversationHandler.END
+
+    # Иначе – режим редактирования
     context.user_data['edit_id'] = trans_id
-    info = get_text(uid, 'edit_info', trans_id, 'доход' if trans[2] == 'income' else 'расход', trans[1], trans[3],
-                    trans[4] or '—')
+    typ_ru = "доход" if trans[2] == 'income' else "расход"
+    info = get_text(uid, 'edit_info', trans_id, typ_ru, trans[1], trans[3], trans[4] or '—')
+
     kb = ReplyKeyboardMarkup([
         [get_text(uid, 'edit_type_btn'), get_text(uid, 'edit_cat_btn')],
         [get_text(uid, 'edit_amount_btn'), get_text(uid, 'edit_desc_btn')],
         [get_text(uid, 'edit_delete_btn'), get_text(uid, 'edit_back_btn')]
     ], resize_keyboard=True, one_time_keyboard=True)
+
     await update.message.reply_text(info, reply_markup=kb)
     return EDIT_ACTION
 
@@ -2150,16 +2244,12 @@ async def handle_buttons(update, context):
         await history(update, context)
     elif text in ['📊 Отчёт', '📊 Report']:
         await report_interval(update, context)
-    elif text in ['✏️ Редактировать', '✏️ Edit']:
-        await edit_start(update, context)
-    elif text in ['🗑️ Удалить', '🗑️ Delete']:
-        await edit_start(update, context)
     elif text in ['📂 Категории и бюджеты', '📂 Categories & budgets']:
         await cat_budget_menu(update, context)
     elif text in ['📊 Графики', '📊 Charts']:
-        await charts_menu(update, context)  # ← ЭТА СТРОКА ОТСУТСТВУЕТ!
+        await charts_menu(update, context)
     elif text in ['⏰ Напоминания', '⏰ Reminders']:
-        await reminder_menu(update, context)  # ← ЭТА СТРОКА ТОЖЕ ОТСУТСТВУЕТ!
+        await reminder_menu(update, context)
     elif text in ['🌐 Язык / Language']:
         await language_switch(update, context)
     else:
@@ -2215,13 +2305,15 @@ def main():
             EXPORT: [CallbackQueryHandler(export_callback)],
         },
         fallbacks=[CommandHandler('cancel', cancel_all)],
-        per_message=True,  # Изменено на True для поддержки CallbackQueryHandler
+        per_message=False,  # ← ИЗМЕНИТЬ НА False
     )
     app.add_handler(report_conv)
 
     # Редактирование / удаление
     edit_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^[✏️] Редактировать|[✏️] Edit$"), edit_start)],
+        entry_points=[
+            MessageHandler(filters.Regex(r'^✏️ Редактировать$|^✏️ Edit$|^🗑️ Удалить$|^🗑️ Delete$'), edit_start)
+        ],
         states={
             EDIT_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_get_id)],
             EDIT_ACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_action)],
@@ -2230,6 +2322,7 @@ def main():
         },
         fallbacks=[CommandHandler('cancel', cancel_all)],
         per_message=False,
+        allow_reentry=True,
     )
     app.add_handler(edit_conv)
 
@@ -2282,7 +2375,7 @@ def main():
             BUDGET_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, budget_set_amount)],
         },
         fallbacks=[CommandHandler('cancel', cancel_all)],
-        per_message=True,  # Изменено на True для поддержки CallbackQueryHandler
+        per_message=False,  # ← ИЗМЕНИТЬ НА False
     )
     app.add_handler(cat_conv)
 
